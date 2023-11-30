@@ -1,0 +1,228 @@
+---
+title: "QBIO_final_project_hpv"
+output: html_document
+date: "2023-11-30"
+---
+
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("/Users/kevinliu/Desktop/QBIO_490/Final Project/qbio_tcga_hnsc/analysis_data"))
+```
+
+
+```{r}
+# install, only if needed, and load packages (SummarizedExperiment and TCGAbiolinks)
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(version = "3.17")
+if (!require("TCGAbiolinks", quietly = TRUE))
+  BiocManager::install("TCGAbiolinks")
+if (!require("maftools", quietly = TRUE))
+  BiocManager::install("maftools")
+if (!require("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+if (!require("EnhancedVolcano", quietly = TRUE))
+  BiocManager::install("EnhancedVolcano")
+if (!require(survival)) {
+  install.packages("survival")}
+if (!require(survminer)) {
+  install.packages("survminer")}
+if (!require(mltools)) {
+  install.packages("dplyr")}
+
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(ggplot2)
+library (SummarizedExperiment)
+library(DESeq2)
+library(EnhancedVolcano)
+library(survminer)
+library(survival)
+library(dplyr)
+
+```
+
+```{r}
+#neccessary downloads and preparation for clinical files
+
+clin_query <- GDCquery(project = "TCGA-HNSC",
+                       data.category = "Clinical",
+                       data.type = "Clinical Supplement",
+                       data.format = 'BCR Biotab')
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)  
+clinic <- clinical.BCRtab.all$clinical_patient_hnsc[-c(1,2),]
+
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+
+write.csv(clinic, "/Users/kevinliu/desktop/qbio_490/QBIO_490_kevinliu/analysis_data/hnsc_clinical_data.csv", row.names=FALSE)
+
+clinic <- read.csv("/Users/kevinliu/desktop/qbio_490/QBIO_490_kevinliu/analysis_data/hnsc_clinical_data.csv")
+
+
+```
+
+```{r}
+#neccessary downloads and preparation for rna_se files
+
+rna_query <- GDCquery(project ="TCGA-HNSC",
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts")
+GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+
+rna_clinical <- rna_se@colData
+rna_clinical <- as.data.frame(rna_clinical)
+rna_clinical$Tumor_Sample_Barcode <- rna_clinical$patient
+
+```
+
+```{r}
+#neccessary downloads and preparation for MAF files
+
+clinical <- read.csv("/Users/kevinliu/desktop/qbio_490/QBIO_490_kevinliu/analysis_data/hnsc_clinical_data.csv")
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+write.csv(clinical, "/Users/kevinliu/desktop/qbio_490/QBIO_490_kevinliu/analysis_data/hnsc_clinical_data.csv", row.names = FALSE)
+
+maf_query <- GDCquery(
+  project = "TCGA-HNSC", 
+  data.category = "Simple Nucleotide Variation", 
+  access = "open", # we only have access to somatic mutations which are open access
+  data.type = "Masked Somatic Mutation", 
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query) # as long as it runs, ignore any errors
+
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = rna_clinical,
+                       isTCGA = TRUE)
+```
+
+HPV groups (clinic)
+```{r}
+negative_mask <- ifelse(clinical$hpv_status_p16 == "Negative", TRUE, FALSE)
+positive_mask <- ifelse(clinical$hpv_status_p16 == "Positive", TRUE, FALSE)
+
+negative_only <- clinical[negative_mask, ]
+positive_only <- clinical[positive_mask, ]
+
+clinical$negative_only <- ifelse(clinical$Tumor_Sample_Barcode %in% negative_only$Tumor_Sample_Barcode, "Yes", "No")
+clinical$positive_only <- ifelse(clinical$Tumor_Sample_Barcode %in% positive_only$Tumor_Sample_Barcode, "Yes", "No")
+
+```
+
+CoOncoplots
+```{r}
+#variables for plotting
+
+maf_object@clinical.data$negative_only <- ifelse(maf_object@clinical.data$patient %in% negative_only$Tumor_Sample_Barcode, "Yes", "No")
+
+maf_object@clinical.data$positive_only <- ifelse(maf_object@clinical.data$patient %in% positive_only$Tumor_Sample_Barcode, "Yes", "No")
+
+
+
+negative_only_barcodes <- maf_object@clinical.data[ifelse(maf_object@clinical.data$negative_only == "Yes", TRUE, FALSE), ]$Tumor_Sample_Barcode
+negative <- subsetMaf(maf = maf_object,
+                        tsb = negative_only_barcodes)
+
+positive_only_barcodes <- maf_object@clinical.data[ifelse(maf_object@clinical.data$positive_only == "Yes", TRUE, FALSE), ]$Tumor_Sample_Barcode
+positive <- subsetMaf(maf = maf_object,
+                           tsb = positive_only_barcodes)
+
+coOncoplot(m1 = negative,
+           m2 = positive,
+           m1Name = "negative",
+           m2Name = "positive",
+           anno_height = 4,
+           outer_mar = 4,
+           barcode_mar = 1.5,
+           geneNamefont = 0.7,
+           gene_mar = 1.9,
+           titleFontSize = 0.8,
+           borderCol = NA)
+
+```
+
+Somatic Interactions
+```{r}
+somaticInteractions(maf = negative,
+                    genes = NULL,
+                    pvalue = c(0.05, 0.1)) ## these are the default p-value significance levels
+
+somaticInteractions(maf = positive,
+                    genes = NULL,
+                    pvalue = c(0.05, 0.1)) ## these are the default p-value significance levels
+```
+
+Lollipop
+```{r}
+lollipopPlot2(m1 = negative, 
+              m2 = positive, 
+              m1_name = "only_alc",
+              m2_name = "only_cig",
+              gene = "TP53",
+              showDomainLabel = FALSE
+              )
+```
+
+KM Survival plot
+```{r}
+
+rna_clinical$negative_only <- ifelse(rna_clinical$patient %in% negative_only$Tumor_Sample_Barcode, "Yes", "No")
+
+rna_clinical$positive_only <- ifelse(rna_clinical$patient %in% positive_only$Tumor_Sample_Barcode, "Yes", "No")
+
+rna_clinical$survival_time <- ifelse(!is.na(rna_clinical$days_to_last_follow_up), rna_clinical$days_to_last_follow_up, rna_clinical$days_to_death)
+
+rna_clinical$survival_time <- as.numeric(rna_clinical$survival_time)
+rna_clinical <- rna_clinical[!is.na(rna_clinical$survival_time),]
+
+rna_clinical$death_event <- ifelse(rna_clinical$vital_status == "Dead", T, F)
+
+#Prepare KM Plot variables using hpv negative
+survival_object <- Surv(time = rna_clinical$survival_time,
+                        event = rna_clinical$death_event)
+
+fit_object <- survfit(survival_object ~ negative_only, data = rna_clinical)
+
+survplot <- ggsurvplot(fit_object,
+                       pval=TRUE,
+                       ggtheme = theme(plot.margin = unit(c(1,1,1,1), "cm")),
+                       legend = 'right')
+
+KM_plot <- survplot$plot + theme_bw() + theme(axis.title = element_text(size=20), 
+                                              axis.text = element_text(size=16),
+                                              legend.title = element_text(size=14),
+                                              legend.text = element_text(size=12))
+
+KM_plot
+
+#Prepare KM Plot variables using hpv positive
+survival_object <- Surv(time = rna_clinical$survival_time,
+                        event = rna_clinical$death_event)
+
+fit_object <- survfit(survival_object ~ positive_only, data = rna_clinical)
+
+survplot <- ggsurvplot(fit_object,
+                       pval=TRUE,
+                       ggtheme = theme(plot.margin = unit(c(1,1,1,1), "cm")),
+                       legend = 'right')
+
+KM_plot <- survplot$plot + theme_bw() + theme(axis.title = element_text(size=20), 
+                                              axis.text = element_text(size=16),
+                                              legend.title = element_text(size=14),
+                                              legend.text = element_text(size=12))
+
+KM_plot
+
+```
+
+
+
+
+
+
